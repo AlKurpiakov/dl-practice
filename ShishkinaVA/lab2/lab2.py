@@ -1,4 +1,3 @@
-import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -7,6 +6,8 @@ import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 import numpy as np
+import argparse
+from torchmetrics import Accuracy
 
 class SimpleCNN(nn.Module):
     def __init__(self):
@@ -34,11 +35,42 @@ class SimpleCNN(nn.Module):
         x = self.features(x)
         x = self.classifier(x)
         return x
-def show_predictions(model, testloader, classes, device, num_images=8):
+def train_model(model, trainloader, criterion, optimizer, device, num_epochs):
+    train_losses = []
+    train_accuracies = []
+
+    train_acc_metric = Accuracy(task="multiclass", num_classes=10).to(device)
+
+    for epoch in range(num_epochs):
+        model.train()
+        running_loss = 0.0
+        train_acc_metric.reset()
+
+        for inputs, labels in trainloader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
+            running_loss += loss.item()
+            train_acc_metric.update(outputs, labels)
+
+        epoch_loss = running_loss / len(trainloader)
+        epoch_acc = train_acc_metric.compute().item()
+
+        train_losses.append(epoch_loss)
+        train_accuracies.append(epoch_acc)
+
+        print(f"Эпоха [{epoch+1}/{num_epochs}] Train Loss: {epoch_loss:.4f}, Train Acc: {epoch_acc:.4f}")
+
+    return train_losses, train_accuracies
+
+def show_predictions(model, testloader, classes, device, num_images, save_path):
     model.eval()
     dataiter = iter(testloader)
     images, labels = next(dataiter)
-
     images, labels = images.to(device), labels.to(device)
     
     with torch.no_grad():
@@ -47,81 +79,41 @@ def show_predictions(model, testloader, classes, device, num_images=8):
     
     images = images.cpu()
     images = images / 2 + 0.5
-    
     fig, axes = plt.subplots(2, 4, figsize=(12, 6))
     axes = axes.ravel()
-    
-    for i in range(num_images):
+    for i in range(min(num_images, len(images))):
         img = images[i].numpy()
         img = np.transpose(img, (1, 2, 0))
-        
         axes[i].imshow(img)
         axes[i].set_title(f'True: {classes[labels[i]]}\nPred: {classes[predicted[i]]}',
                          color='green' if predicted[i] == labels[i] else 'red')
         axes[i].axis('off')
     
     plt.tight_layout()
-    plt.savefig('predictions.png', dpi=100, bbox_inches='tight')
+    plt.savefig(save_path, dpi=100, bbox_inches='tight')
     plt.show()
-    
-    correct = (predicted == labels).sum().item()
-    accuracy = 100 * correct / len(labels)
-    print(f"Точность на этом батче: {accuracy:.2f}%")
 
-def train_one_epoch(model, dataloader, criterion, optimizer, device):
-    model.train()
-    running_loss = 0.0
-    correct = 0
-    total = 0
-
-    for inputs, labels in dataloader:
-        inputs, labels = inputs.to(device), labels.to(device)
-
-        optimizer.zero_grad()
-        outputs = model(inputs)
-        loss = criterion(outputs, labels)
-        loss.backward()
-        optimizer.step()
-
-        running_loss += loss.item()
-        _, predicted = torch.max(outputs, 1)
-        total += labels.size(0)
-        correct += (predicted == labels).sum().item()
-
-    epoch_loss = running_loss / len(dataloader)
-    epoch_acc = correct / total
-    return epoch_loss, epoch_acc
+    acc_metric = Accuracy(task="multiclass", num_classes=10).to(device)
+    batch_accuracy = acc_metric(outputs, labels).item()
+    print(f"Точность на этом батче: {100 * batch_accuracy:.2f}%")
 
 def evaluate(model, dataloader, criterion, device):
     model.eval()
     test_loss = 0.0
-    correct = 0
-    total = 0
+    test_acc_metric = Accuracy(task="multiclass", num_classes=10).to(device)
+
     with torch.no_grad():
         for inputs, labels in dataloader:
             inputs, labels = inputs.to(device), labels.to(device)
             outputs = model(inputs)
             test_loss += criterion(outputs, labels).item()
-            _, predicted = torch.max(outputs, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
+            test_acc_metric.update(outputs, labels)
+
     avg_test_loss = test_loss / len(dataloader)
-    test_acc = correct / total
+    test_acc = test_acc_metric.compute().item()
     return avg_test_loss, test_acc
 
-def calculate_accuracy(model, dataloader, device):
-    model.eval()
-    correct = 0
-    total = 0
-    with torch.no_grad():
-        for inputs, labels in dataloader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            outputs = model(inputs)
-            _, predicted = torch.max(outputs, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-    return correct / total
-def plot_training_history(train_losses, test_losses, train_accuracies, test_accuracies, save_path='training_results.png'):
+def plot_training_history(train_losses, train_accuracies, save_path):
 
     epochs = range(1, len(train_losses) + 1)
 
@@ -129,7 +121,7 @@ def plot_training_history(train_losses, test_losses, train_accuracies, test_accu
 
     plt.subplot(1, 2, 1)
     plt.plot(epochs, train_losses, label='Train Loss', marker='o')
-    plt.plot(epochs, test_losses, label='Test Loss', marker='s')
+    # plt.plot(epochs, test_losses, label='Test Loss', marker='s')
     plt.title('График ошибки (Loss)')
     plt.xlabel('Эпоха')
     plt.ylabel('Loss')
@@ -138,7 +130,7 @@ def plot_training_history(train_losses, test_losses, train_accuracies, test_accu
 
     plt.subplot(1, 2, 2)
     plt.plot(epochs, train_accuracies, label='Train Accuracy', marker='o')
-    plt.plot(epochs, test_accuracies, label='Test Accuracy', marker='s', color='orange')
+    # plt.plot(epochs, test_accuracies, label='Test Accuracy', marker='s', color='orange')
     plt.title('Точность на обучающем и тестовом наборах')
     plt.xlabel('Эпоха')
     plt.ylabel('Accuracy')
@@ -150,7 +142,78 @@ def plot_training_history(train_losses, test_losses, train_accuracies, test_accu
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     print(f"График сохранён как '{save_path}'")
 
-if __name__ == '__main__':
+def load_classes(file_path):
+    with open(file_path, 'r', encoding='utf-8') as f:
+        classes = [line.strip() for line in f if line.strip()]
+    return classes
+
+def cli_argument_parser():
+    parser = argparse.ArgumentParser(
+        description="Обучение и оценка CNN-модели на датасете CIFAR-10."
+    )
+
+    parser.add_argument('-dd', '--data_dir',
+                        help='Директория для загрузки/хранения датасета CIFAR-10',
+                        type=str,
+                        dest='data_dir',
+                        default='./data')
+
+    parser.add_argument('-cf', '--classes_file',
+                        help='Путь к файлу со списком классов (по одному на строку)',
+                        type=str,
+                        dest='classes_file',
+                        default='classes.txt')
+
+    parser.add_argument('-e', '--epochs',
+                        help='Количество эпох обучения',
+                        type=int,
+                        dest='epochs',
+                        default=10)
+
+    parser.add_argument('-bs', '--batch_size',
+                        help='Размер батча для DataLoader',
+                        type=int,
+                        dest='batch_size',
+                        default=64)
+    parser.add_argument('-lr', '--learning_rate',
+                        help='Скорость обучения для оптимизатора SGD',
+                        type=float,
+                        dest='learning_rate',
+                        default=0.01)
+
+    parser.add_argument('-mom', '--momentum',
+                        help='Моментум для оптимизатора SGD',
+                        type=float,
+                        dest='momentum',
+                        default=0.9)
+
+    parser.add_argument('-msp', '--model_save_path',
+                        help='Путь для сохранения весов модели',
+                        type=str,
+                        dest='model_save_path',
+                        default='cifar10_cnn.pth')
+
+    parser.add_argument('-hsp', '--history_save_path',
+                        help='Путь для сохранения графика истории обучения',
+                        type=str,
+                        dest='history_save_path',
+                        default='training_results.png')
+
+    parser.add_argument('-psp', '--predictions_save_path',
+                        help='Путь для сохранения изображения с предсказаниями',
+                        type=str,
+                        dest='predictions_save_path',
+                        default='predictions.png')
+    parser.add_argument('-ni', '--num_images',
+                        help='Количество изображений для визуализации предсказаний (макс. размер батча)',
+                        type=int,
+                        dest='num_images',
+                        default=8)
+
+    args = parser.parse_args()
+    return args
+
+def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Устройство: {device}")
 
@@ -159,24 +222,24 @@ if __name__ == '__main__':
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
     ])
 
-    trainset = torchvision.datasets.CIFAR10(root='./data', train=True, download=False, transform=transform)
-    testset = torchvision.datasets.CIFAR10(root='./data', train=False, download=False, transform=transform)
+    trainset = torchvision.datasets.CIFAR10(root=args.data_dir, train=True, download=False, transform=transform)
+    testset = torchvision.datasets.CIFAR10(root=args.data_dir, train=False, download=False, transform=transform)
 
-    trainloader = DataLoader(trainset, batch_size=64, shuffle=True, num_workers=2)
-    testloader = DataLoader(testset, batch_size=64, shuffle=False, num_workers=2)
+    trainloader = DataLoader(trainset, batch_size=args.batch_size, shuffle=True, num_workers=2)
+    testloader = DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=2)
 
-    classes = ('plane', 'car', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck')
+    classes = load_classes(args.classes_file)
+    print(f"Классы: {classes}")
     print(f"Обучающих изображений: {len(trainset)}")
     print(f"Тестовых изображений: {len(testset)}")
 
-    net = SimpleCNN().to(device)
+    model = SimpleCNN().to(device)
     print("\nАрхитектура модели:")
-    print(net)
+    print(model)
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.SGD(net.parameters(), lr=0.01, momentum=0.9)
+    optimizer = optim.SGD(model.parameters(), lr=args.learning_rate, momentum=args.momentum)
 
-    num_epochs = 10
     train_losses = []
     train_accuracies = []
     test_losses = []
@@ -184,27 +247,21 @@ if __name__ == '__main__':
 
     print("\nОбучение...\n")
 
-    for epoch in range(num_epochs):
-        train_loss, train_acc = train_one_epoch(net, trainloader, criterion, optimizer, device)
-        test_loss, test_acc = evaluate(net, testloader, criterion, device)
-
-        train_losses.append(train_loss)
-        train_accuracies.append(train_acc)
-        test_losses.append(test_loss)
-        test_accuracies.append(test_acc)
-        
-        print(f"Эпоха [{epoch+1}/{num_epochs}] "
-              f"Train Loss: {train_loss:.4f} "
-              f"Train Acc: {train_acc:.4f} "
-              f"Test Loss: {test_loss:.4f}")
-
-    final_accuracy = calculate_accuracy(net, testloader, device)
-    print(f"\nТочность: {100 * final_accuracy:.2f}%")
-
-    plot_training_history(train_losses, test_losses,train_accuracies, test_accuracies,save_path='training_results.png')
     
-    torch.save(net.state_dict(), 'cifar10_cnn.pth')
-    print("Модель сохранена, как 'cifar10_cnn.pth'")
+    train_losses, train_accuracies = train_model(
+        model, trainloader, criterion, optimizer, device, args.epochs
+    )
+
+    test_losses, test_accuracies = evaluate(model, testloader, criterion, device)
+    print(f"\nФинальная точность: {100 * test_accuracies:.2f}%")
+
+    plot_training_history(train_losses, train_accuracies, save_path=args.history_save_path)
+    torch.save(model.state_dict(), args.model_save_path)
+    print(f"Модель сохранена как '{args.model_save_path}'")
 
     print("\nВизуализация ...")
-    show_predictions(net, testloader, classes, device)
+    show_predictions(model, testloader, classes, device, num_images=args.num_images, save_path=args.predictions_save_path)
+
+if __name__ == '__main__':
+    args = cli_argument_parser()
+    main(args)
