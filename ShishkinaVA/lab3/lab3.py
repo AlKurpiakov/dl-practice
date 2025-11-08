@@ -6,58 +6,48 @@ import torchvision.transforms as transforms
 import torchvision.models as models
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
-import torchviz
+from torchmetrics import Accuracy
+import argparse
 import os
 
-def train_one_epoch(model, dataloader, criterion, optimizer, device):
-    model.train()
-    running_loss = 0.0
-    correct = 0
-    total = 0
-    for inputs, labels in dataloader:
-        inputs, labels = inputs.to(device), labels.to(device)
-        optimizer.zero_grad()
-        outputs = model(inputs)
-        loss = criterion(outputs, labels)
-        loss.backward()
-        optimizer.step()
-        running_loss += loss.item()
-        _, predicted = torch.max(outputs, 1)
-        total += labels.size(0)
-        correct += (predicted == labels).sum().item()
-    epoch_loss = running_loss / len(dataloader)
-    epoch_acc = correct / total
-    return epoch_loss, epoch_acc
+def train_model(model, trainloader, criterion, optimizer, device, num_epochs):
+    for epoch in range(num_epochs):
+        model.train()
+        running_loss = 0.0
+        acc_metric = Accuracy(task="multiclass", num_classes=10).to(device)
+
+        for inputs, labels in trainloader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
+            running_loss += loss.item()
+            acc_metric.update(outputs, labels)
+
+        epoch_loss = running_loss / len(trainloader)
+        epoch_acc = acc_metric.compute().item()
+        print(f"Эпоха [{epoch+1}/{num_epochs}] Train Loss: {epoch_loss:.4f}, Train Acc: {epoch_acc:.4f}")
+
+    return model
 
 def evaluate(model, dataloader, criterion, device):
     model.eval()
     test_loss = 0.0
-    correct = 0
-    total = 0
+    acc_metric = Accuracy(task="multiclass", num_classes=10).to(device)
+
     with torch.no_grad():
         for inputs, labels in dataloader:
             inputs, labels = inputs.to(device), labels.to(device)
             outputs = model(inputs)
             test_loss += criterion(outputs, labels).item()
-            _, predicted = torch.max(outputs, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-    avg_test_loss = test_loss / len(dataloader)
-    test_acc = correct / total
-    return avg_test_loss, test_acc
+            acc_metric.update(outputs, labels)
 
-def calculate_accuracy(model, dataloader, device):
-    model.eval()
-    correct = 0
-    total = 0
-    with torch.no_grad():
-        for inputs, labels in dataloader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            outputs = model(inputs)
-            _, predicted = torch.max(outputs, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-    return correct / total
+    avg_test_loss = test_loss / len(dataloader)
+    test_acc = acc_metric.compute().item()
+    return avg_test_loss, test_acc
 
 def create_transfer_model(model_name, num_classes=10, pretrained=True, freeze_backbone=True):
     if model_name == 'vgg16':
@@ -94,7 +84,7 @@ def create_transfer_model(model_name, num_classes=10, pretrained=True, freeze_ba
 
     return model, trainable_params, init_info
 
-def run_experiment(model_name, freeze_backbone, trainloader, testloader, device, num_epochs):
+def run_experiment(model_name, freeze_backbone, trainloader, testloader, device, num_epochs, lr, momentum, models_dir):
     model, trainable_params, init_info = create_transfer_model(
         model_name, num_classes=10, pretrained=True, freeze_backbone=freeze_backbone
     )
@@ -107,22 +97,26 @@ def run_experiment(model_name, freeze_backbone, trainloader, testloader, device,
         modified_layer_info = f"EfficientNet Classifier[1]: {model.classifier[1].in_features} -> {model.classifier[1].out_features}"
     
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.SGD(trainable_params, lr=0.01, momentum=0.9)
+    optimizer = optim.SGD(trainable_params, lr=lr, momentum=momentum)
 
-    for epoch in range(num_epochs):
-        train_loss, train_acc = train_one_epoch(model, trainloader, criterion, optimizer, device)
-        test_loss, test_acc = evaluate(model, testloader, criterion, device)
+    model = train_model(model, trainloader, criterion, optimizer, device, num_epochs)
 
-    final_acc = calculate_accuracy(model, testloader, device)
+    final_test_loss, final_test_acc = evaluate(model, testloader, criterion, device)
     exp_type = "classifier_only" if freeze_backbone else "full_finetune"
+    os.makedirs(models_dir, exist_ok=True)
+    suffix = "clf" if freeze_backbone else "full"
+    save_path = os.path.join(models_dir, f"{model_name}_{suffix}.pth")
+    torch.save(model.state_dict(), save_path)
+    print(f"Модель сохранена: {save_path}")
     return {
         'model': model_name,
         'experiment': exp_type,
-        'accuracy': final_acc,
+        'accuracy':  final_test_acc,
         'init_info': init_info,
         'optimizer': 'SGD (lr=0.01, momentum=0.9)',
         'modified_layer': modified_layer_info,
-        'epochs': num_epochs
+        'epochs': num_epochs,
+        'save_path': save_path
     }
 
 def plot_comparison_histogram(results, save_path='transfer_learning_comparison.png'):
@@ -194,7 +188,73 @@ def print_best_result(results):
     print(f"Эпох обучения:        {best_result['epochs']}")
     print(f"Точность на тесте:    {100 * best_result['accuracy']:.2f}%")
 
-if __name__ == '__main__':
+def load_model_names(file_path):
+    with open(file_path, 'r', encoding='utf-8') as f:
+        model_names = [line.strip() for line in f if line.strip()]
+    return model_names
+
+def cli_argument_parser():
+    parser = argparse.ArgumentParser(
+        description="Transfer Learning на CIFAR-10 с предобученными моделями."
+    )
+
+    parser.add_argument('-dd', '--data_dir',
+                        help='Директория для загрузки/хранения датасета CIFAR-10',
+                        type=str,
+                        dest='data_dir',
+                        default='./data')
+
+    parser.add_argument('-e', '--epochs',
+                        help='Количество эпох обучения',
+                        type=int,
+                        dest='epochs',
+                        default=10)
+
+    parser.add_argument('-bs', '--batch_size',
+                        help='Размер батча для DataLoader',
+                        type=int,
+                        dest='batch_size',
+                        default=64)
+    parser.add_argument('-lr', '--learning_rate',
+                        help='Скорость обучения для оптимизатора SGD',
+                        type=float,
+                        dest='learning_rate',
+                        default=0.01)
+
+    parser.add_argument('-mom', '--momentum',
+                        help='Моментум для оптимизатора SGD',
+                        type=float,
+                        dest='momentum',
+                        default=0.9)
+
+    parser.add_argument('-msp', '--model_save_path',
+                        help='Путь для сохранения весов модели',
+                        type=str,
+                        dest='model_save_path',
+                        default='cifar10_cnn.pth')
+
+    parser.add_argument('-psp', '--predictions_save_path',
+                        help='Путь для сохранения изображения с предсказаниями',
+                        type=str,
+                        dest='predictions_save_path',
+                        default='transfer_learning_comparison.png')
+    
+    parser.add_argument('--model_names_file',
+                        help='Путь к файлу со списком доступных моделей (по одной на строку)',
+                        type=str,
+                        dest='model_names_file',
+                        default='transfer_models.txt')
+    
+    parser.add_argument('--models_dir',
+                        help='Директория для сохранения весов обученных моделей',
+                        type=str,
+                        dest='models_dir',
+                        default='./saved_models')
+
+    args = parser.parse_args()
+    return args
+
+def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Устройство: {device}")
 
@@ -202,31 +262,45 @@ if __name__ == '__main__':
         transforms.ToTensor(),
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
     ])
+    # transform = transforms.Compose([
+    #     transforms.Resize(224),
+    #     transforms.ToTensor(),
+    #     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    # ])
 
-    trainset = torchvision.datasets.CIFAR10(root='./data', train=True, download=False, transform=transform)
-    testset = torchvision.datasets.CIFAR10(root='./data', train=False, download=False, transform=transform)
+    trainset = torchvision.datasets.CIFAR10(root=args.data_dir, train=True, download=False, transform=transform)
+    testset = torchvision.datasets.CIFAR10(root=args.data_dir, train=False, download=False, transform=transform)
 
-    trainloader = DataLoader(trainset, batch_size=64, shuffle=True, num_workers=2)
-    testloader = DataLoader(testset, batch_size=64, shuffle=False, num_workers=2)
+    trainloader = DataLoader(trainset, batch_size=args.batch_size, shuffle=True, num_workers=2)
+    testloader = DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=2)
 
     print(f"Обучающих изображений: {len(trainset)}")
     print(f"Тестовых изображений: {len(testset)}")
 
-    model_names = ['vgg16', 'resnet50', 'resnet18', 'efficientnet_b0']
+    model_names = load_model_names(args.model_names_file)
+    print(f"Модели для экспериментов: {model_names}")
     results = []
 
     for model_name in model_names:
         print(f"\nЗапуск экспериментов для {model_name}...")
         try:
-            res1 = run_experiment(model_name, freeze_backbone=True,
-                                    trainloader=trainloader, testloader=testloader,
-                                    device=device, num_epochs=1)
+            res1 = run_experiment(
+                model_name, freeze_backbone=True,
+                trainloader=trainloader, testloader=testloader,
+                device=device, num_epochs=args.epochs,
+                lr=args.learning_rate, momentum=args.momentum,
+                models_dir=args.models_dir
+            )
             results.append(res1)
             print(f"classifier_only: {res1['accuracy']:.4f}")
 
-            res2 = run_experiment(model_name, freeze_backbone=False,
-                                    trainloader=trainloader, testloader=testloader,
-                                    device=device, num_epochs=1)
+            res2 = run_experiment(
+                model_name, freeze_backbone=False,
+                trainloader=trainloader, testloader=testloader,
+                device=device, num_epochs=args.epochs,
+                lr=args.learning_rate, momentum=args.momentum,
+                models_dir=args.models_dir
+            )
             results.append(res2)
             print(f"full_finetune:   {res2['accuracy']:.4f}")
         except Exception as e:
@@ -237,8 +311,10 @@ if __name__ == '__main__':
     else:
         best_result = max(results, key=lambda x: x['accuracy'])
 
-        plot_comparison_histogram(results, save_path='transfer_learning_comparison.png')
+    plot_comparison_histogram(results, save_path=args.predictions_save_path)
+    print_detailed_results(results)
+    print_best_result(results)
 
-        print_detailed_results(results)
-        
-        print_best_result(results)
+if __name__ == '__main__':
+    args = cli_argument_parser()
+    main(args)
